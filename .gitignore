@@ -1,0 +1,5 @@
+build*/
+CLAUDE.lock
+*.o
+*.log
+compile_commands.json

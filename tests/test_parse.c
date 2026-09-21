@@ -1,0 +1,310 @@
+/* Store-merge, XML and URL handling: the logic that decides whether two
+   sightings are the same box, and what gets read out of a UPnP description. */
+#include "device.h"
+#include "http.h"
+#include "util.h"
+#include "xmlmini.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int failures;
+
+#define CHECK(cond)                                                                                \
+    do {                                                                                           \
+        if (!(cond)) {                                                                             \
+            printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                                 \
+            failures++;                                                                            \
+        }                                                                                          \
+    } while (0)
+
+#define CHECK_STR(got, want)                                                                       \
+    do {                                                                                           \
+        const char *g_ = (got);                                                                    \
+        if (!g_ || strcmp(g_, (want)) != 0) {                                                      \
+            printf("FAIL %s:%d: got \"%s\", want \"%s\"\n", __FILE__, __LINE__, g_ ? g_ : "(null)",\
+                   (want));                                                                        \
+            failures++;                                                                            \
+        }                                                                                          \
+    } while (0)
+
+static addr_t v4(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+{
+    addr_t out;
+    uint8_t raw[4] = {a, b, c, d};
+    addr_from_v4(&out, raw);
+    return out;
+}
+
+static void test_addr(void)
+{
+    addr_t a = v4(192, 168, 2, 21);
+    addr_t b = v4(192, 168, 2, 21);
+    addr_t c = v4(192, 168, 2, 22);
+    CHECK(addr_equal(&a, &b));
+    CHECK(!addr_equal(&a, &c));
+    CHECK_STR(a.str, "192.168.2.21");
+
+    uint8_t zero[4] = {0, 0, 0, 0};
+    addr_t z;
+    CHECK(!addr_from_v4(&z, zero));
+
+    /* The same link-local address on two interfaces is two different hosts. */
+    uint8_t ll[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    addr_t l1, l2;
+    CHECK(addr_from_v6(&l1, ll, 2));
+    CHECK(addr_from_v6(&l2, ll, 3));
+    CHECK(!addr_equal(&l1, &l2));
+}
+
+/* The core merge: SSDP finds the address first, mDNS then resolves a hostname
+   with a service on it. One device must come out, carrying both. */
+static void test_merge(void)
+{
+    store_t s;
+    store_init(&s);
+    uint64_t now = 1000;
+
+    addr_t a = v4(192, 168, 2, 21);
+    device_t *ssdp_dev = store_device_for_addr(&s, &a, now, SRC_SSDP);
+    ssdp_entry_t *e = device_ssdp(&s, ssdp_dev, "uuid:1234::upnp:rootdevice", "upnp:rootdevice",
+                                  now);
+    str_set(&e->location, "http://192.168.2.21:8080/desc.xml");
+    CHECK(s.n_devices == 1);
+
+    /* mDNS side: a service whose SRV names a host we have no address for yet. */
+    device_t *host_dev = store_device_for_host(&s, "printer.local", now, SRC_MDNS);
+    CHECK(s.n_devices == 2);
+    service_t *sv = device_service(&s, host_dev, "Printer._ipp._tcp.local", now);
+    sv->port = 631;
+    sv->have_srv = true;
+    service_set_txt(sv, "rp=ipp/print", 12);
+    service_set_txt(sv, "ty=HP LaserJet", 14);
+    CHECK_STR(sv->type, "_ipp._tcp");
+
+    /* The A record arrives: the two sightings collapse into one device. */
+    device_t *d = store_device_for_addr(&s, &a, now, SRC_MDNS);
+    d = store_set_host(&s, d, "printer.local", now);
+    CHECK(s.n_devices == 1);
+    CHECK(d->sources == (SRC_MDNS | SRC_SSDP));
+    CHECK(d->n_services == 1);
+    CHECK(d->n_ssdp == 1);
+    CHECK_STR(d->hostname, "printer.local");
+    CHECK_STR(device_label(d), "printer.local");
+    CHECK_STR(device_primary_addr(d), "192.168.2.21");
+
+    char src[16];
+    device_sources_str(d, src, sizeof src);
+    CHECK_STR(src, "mDNS+SSDP");
+
+    /* The service survived the merge and is findable by fqdn. */
+    device_t *owner = NULL;
+    service_t *found = store_find_service(&s, "Printer._ipp._tcp.local", &owner);
+    CHECK(found != NULL && owner == d);
+    CHECK(found && found->port == 631);
+    CHECK(found && found->n_txt == 2);
+
+    /* Setting an existing TXT key replaces it instead of duplicating. */
+    service_set_txt(found, "ty=HP OfficeJet", 15);
+    CHECK(found->n_txt == 2);
+    CHECK_STR(found->txt->next->val, "HP OfficeJet");
+
+    /* A second address on the same device does not create a second device. */
+    addr_t a2 = v4(192, 168, 2, 99);
+    d = store_add_addr(&s, d, &a2, now);
+    CHECK(s.n_devices == 1);
+    CHECK(d->n_addrs == 2);
+
+    /* Filtering reaches into services and UPnP fields. */
+    CHECK(device_matches(d, "laserjet") == false); /* replaced above */
+    CHECK(device_matches(d, "officejet"));
+    CHECK(device_matches(d, "_ipp"));
+    CHECK(device_matches(d, "192.168.2.99"));
+    CHECK(!device_matches(d, "nothing-like-this"));
+
+    /* byebye removes just that entry. */
+    device_drop_ssdp(&s, d, "uuid:1234::upnp:rootdevice");
+    CHECK(d->n_ssdp == 0);
+    CHECK(store_find_ssdp(&s, "uuid:1234::upnp:rootdevice", NULL) == NULL);
+
+    /* Expiry drops what has not been heard from. */
+    store_expire(&s, now + 1000, 100000);
+    CHECK(s.n_devices == 1);
+    store_expire(&s, now + 200000, 100000);
+    CHECK(s.n_devices == 0);
+
+    store_free(&s);
+}
+
+static void test_label_fallbacks(void)
+{
+    store_t s;
+    store_init(&s);
+    addr_t a = v4(10, 0, 0, 5);
+    device_t *d = store_device_for_addr(&s, &a, 1, SRC_SSDP);
+    CHECK_STR(device_label(d), "(unnamed)");
+
+    ssdp_entry_t *e = device_ssdp(&s, d, "uuid:abc", "upnp:rootdevice", 1);
+    e->friendly_name = xstrdup("Living Room TV");
+    CHECK_STR(device_label(d), "Living Room TV");
+
+    d = store_set_host(&s, d, "tv.local", 1);
+    CHECK_STR(device_label(d), "tv.local");
+    store_free(&s);
+}
+
+/* TXT values are not always text: Thread border routers put raw binary in
+   them, NUL bytes included. Those must survive as something printable. */
+static void test_binary_txt(void)
+{
+    store_t s;
+    store_init(&s);
+    addr_t a = v4(10, 0, 0, 7);
+    device_t *d = store_device_for_addr(&s, &a, 1, SRC_MDNS);
+    service_t *sv = device_service(&s, d, "br._meshcop._udp.local", 1);
+
+    service_set_txt(sv, "id=\x96\x9d\x00\xe9", 7);
+    CHECK_STR(sv->txt->key, "id");
+    CHECK_STR(sv->txt->val, "0x969d00e9");
+
+    /* Valid UTF-8 is text and must pass through untouched. */
+    service_set_txt(sv, "n=caf\xc3\xa9", 7);
+    CHECK_STR(sv->txt->next->val, "caf\xc3\xa9");
+
+    /* A bare key with no '=' is a boolean flag, not an empty value. */
+    service_set_txt(sv, "flag", 4);
+    CHECK(sv->n_txt == 3);
+    CHECK(sv->txt->next->next->val == NULL);
+
+    /* An '=' with nothing after it is an empty value, which is different. */
+    service_set_txt(sv, "empty=", 6);
+    CHECK_STR(sv->txt->next->next->next->val, "");
+
+    CHECK(str_is_printable("plain", 5));
+    CHECK(!str_is_printable("a\x01b", 3));
+    CHECK(!str_is_printable("\xff\xfe", 2));
+    store_free(&s);
+}
+
+static void test_xml(void)
+{
+    static const char doc[] =
+        "<?xml version=\"1.0\"?>\n"
+        "<root xmlns=\"urn:schemas-upnp-org:device-1-0\">\n"
+        "  <specVersion><major>1</major><minor>0</minor></specVersion>\n"
+        "  <device>\n"
+        "    <deviceType>urn:schemas-upnp-org:device:Basic:1</deviceType>\n"
+        "    <friendlyName>Jim &amp; Co. &quot;Printer&quot;</friendlyName>\n"
+        "    <manufacturer>HP Inc.</manufacturer>\n"
+        "    <modelName>M283fdw</modelName>\n"
+        "    <serialNumber/>\n"
+        "    <UDN>uuid:1234-5678</UDN>\n"
+        "  </device>\n"
+        "</root>\n";
+    size_t n = sizeof doc - 1;
+
+    char *v = xml_tag(doc, n, "friendlyName");
+    CHECK_STR(v, "Jim & Co. \"Printer\"");
+    free(v);
+
+    v = xml_tag(doc, n, "manufacturer");
+    CHECK_STR(v, "HP Inc.");
+    free(v);
+
+    /* The namespaced root element must not confuse the scan. */
+    v = xml_tag(doc, n, "modelName");
+    CHECK_STR(v, "M283fdw");
+    free(v);
+
+    v = xml_tag(doc, n, "UDN");
+    CHECK_STR(v, "uuid:1234-5678");
+    free(v);
+
+    CHECK(xml_tag(doc, n, "serialNumber") == NULL); /* self-closing: no text */
+    CHECK(xml_tag(doc, n, "modelNumber") == NULL);  /* absent */
+    CHECK(xml_tag("", 0, "friendlyName") == NULL);
+
+    /* An unterminated tag must not run off the end. */
+    static const char broken[] = "<device><friendlyName>no close tag";
+    CHECK(xml_tag(broken, sizeof broken - 1, "friendlyName") == NULL);
+
+    /* A prefixed element still matches. */
+    static const char ns[] = "<d:device><d:friendlyName>Prefixed</d:friendlyName></d:device>";
+    v = xml_tag(ns, sizeof ns - 1, "friendlyName");
+    CHECK_STR(v, "Prefixed");
+    free(v);
+
+    /* Numeric entities. */
+    static const char ent[] = "<a>caf&#233; &#x41;&unknown;</a>";
+    v = xml_tag(ent, sizeof ent - 1, "a");
+    CHECK_STR(v, "caf? A&unknown;");
+    free(v);
+}
+
+static void test_http_bad_urls(void)
+{
+    /* Nothing here touches the network: each URL must fail up front. */
+    const char *bad[] = {"ftp://1.2.3.4/x", "https://1.2.3.4/x", "http://", "not a url",
+                         "http://:80/x"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        http_req_t *r = http_get(bad[i], NULL, 1024, 1000, NULL);
+        CHECK(r != NULL);
+        CHECK(http_step(r, 0, now_ms()) == -1);
+        CHECK(*http_error(r) != '\0');
+        http_free(r);
+    }
+
+    /* A name-based host with no override cannot be resolved without blocking. */
+    http_req_t *r = http_get("http://printer.local:8080/desc.xml", NULL, 1024, 1000, NULL);
+    CHECK(http_step(r, 0, now_ms()) == -1);
+    CHECK_STR(http_error(r), "host is not a literal address");
+    http_free(r);
+
+    /* With an override address the same URL is usable (connect is in flight). */
+    r = http_get("http://printer.local:8080/desc.xml", "192.0.2.1", 1024, 1000, NULL);
+    CHECK(http_step(r, 0, now_ms()) == 0);
+    CHECK(http_fd(r) >= 0);
+    http_free(r);
+
+    /* The deadline is honoured even when the socket never becomes ready. */
+    r = http_get("http://192.0.2.1:8080/desc.xml", NULL, 1024, 0, NULL);
+    CHECK(http_step(r, 0, now_ms() + 1) == -1);
+    CHECK_STR(http_error(r), "timed out");
+    http_free(r);
+}
+
+static void test_util(void)
+{
+    char buf[32];
+    fmt_age(999, buf, sizeof buf);
+    CHECK_STR(buf, "0s");
+    fmt_age(65000, buf, sizeof buf);
+    CHECK_STR(buf, "1m05s");
+    fmt_age(3725000, buf, sizeof buf);
+    CHECK_STR(buf, "1h02m");
+
+    char s[] = "  padded\t\n";
+    CHECK_STR(str_trim(s), "padded");
+    CHECK(str_casecmp("ABC", "abc") == 0);
+    CHECK(str_icontains("Living Room TV", "room"));
+    CHECK(!str_icontains("Living Room TV", "kitchen"));
+    CHECK(str_icontains("anything", ""));
+    CHECK(!str_icontains(NULL, "x"));
+}
+
+int main(void)
+{
+    test_addr();
+    test_merge();
+    test_label_fallbacks();
+    test_binary_txt();
+    test_xml();
+    test_http_bad_urls();
+    test_util();
+    if (failures)
+        printf("%d check(s) failed\n", failures);
+    else
+        printf("all store/xml/http checks passed\n");
+    return failures ? 1 : 0;
+}
