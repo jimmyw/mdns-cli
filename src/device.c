@@ -125,6 +125,34 @@ double ping_avg_ms(const ping_t *p)
     return p->recv ? p->total_ms / (double)p->recv : -1;
 }
 
+ping_grade_t ping_loss_grade(const ping_t *p)
+{
+    if (p->error && p->sent == 0)
+        return PING_GRADE_BAD;
+    double loss = ping_loss_pct(p);
+    if (loss < 0)
+        return PING_GRADE_NONE;
+    if (loss >= PING_LOSS_BAD_PCT)
+        return PING_GRADE_BAD;
+    return loss > 0 ? PING_GRADE_WARN : PING_GRADE_GOOD;
+}
+
+ping_grade_t ping_rtt_grade(const ping_t *p)
+{
+    double avg = ping_avg_ms(p);
+    if (avg < 0)
+        return PING_GRADE_NONE;
+    if (avg >= PING_RTT_BAD_MS)
+        return PING_GRADE_BAD;
+    return avg >= PING_RTT_WARN_MS ? PING_GRADE_WARN : PING_GRADE_GOOD;
+}
+
+ping_grade_t ping_grade(const ping_t *p)
+{
+    ping_grade_t a = ping_loss_grade(p), b = ping_rtt_grade(p);
+    return a > b ? a : b;
+}
+
 bool ping_has_data(const ping_t *p)
 {
     return p->sent > 0 || p->error != NULL;
@@ -285,6 +313,8 @@ static device_t *device_merge(store_t *s, device_t *dst, device_t *src)
         dst->hostname = src->hostname;
         src->hostname = NULL;
     }
+    if (!dst->mac[0] && src->mac[0])
+        memcpy(dst->mac, src->mac, sizeof dst->mac);
     /* Move services, skipping ones dst already knows. */
     service_t *sv = src->services;
     while (sv) {
@@ -620,6 +650,8 @@ bool device_matches(const device_t *d, const char *filter)
     if (!filter || !*filter)
         return true;
     if (str_icontains(d->hostname, filter))
+        return true;
+    if (str_icontains(d->mac, filter))
         return true;
     for (size_t i = 0; i < d->n_addrs; i++)
         if (str_icontains(d->addrs[i].str, filter))

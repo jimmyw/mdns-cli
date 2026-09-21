@@ -14,9 +14,10 @@ typedef struct {
     void *ctx;
     /* The user expanded something whose UPnP description is worth fetching. */
     void (*fetch)(void *ctx, const ssdp_entry_t *e);
-    /* The user pressed p: start pinging this device, or stop if it already is.
+    /* The user pressed p: start pinging this device, or stop if it already
+       is. addr picks which address to probe, NULL meaning the default one.
        Returns NULL, or a short reason it could not start. */
-    const char *(*ping)(void *ctx, device_t *d);
+    const char *(*ping)(void *ctx, device_t *d, const addr_t *addr);
 } ui_hooks_t;
 
 typedef struct {

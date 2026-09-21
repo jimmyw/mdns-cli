@@ -2,6 +2,7 @@
    sightings are the same box, and what gets read out of a UPnP description. */
 #include "device.h"
 #include "http.h"
+#include "neigh.h"
 #include "util.h"
 #include "xmlmini.h"
 
@@ -84,6 +85,9 @@ static void test_merge(void)
     service_set_txt(sv, "ty=HP LaserJet", 14);
     CHECK_STR(sv->type, "_ipp._tcp");
 
+    /* A MAC learned on one half of the merge must survive it. */
+    snprintf(host_dev->mac, sizeof host_dev->mac, "aa:bb:cc:dd:ee:ff");
+
     /* Ping counters recorded before the merge must survive it. */
     ping_record_reply(&host_dev->ping, 3.0);
     host_dev->ping.sent = 1;
@@ -103,6 +107,9 @@ static void test_merge(void)
     char src[16];
     device_sources_str(d, src, sizeof src);
     CHECK_STR(src, "mDNS+SSDP");
+
+    CHECK_STR(d->mac, "aa:bb:cc:dd:ee:ff");
+    CHECK(device_matches(d, "AA:BB:CC")); /* the filter reaches the MAC too */
 
     CHECK(ping_has_data(&d->ping));
     CHECK(d->ping.recv == 1);
@@ -245,6 +252,103 @@ static void test_ping_counters(void)
     CHECK(!ping_has_data(&p));
 }
 
+/* The green / yellow / red tiers the UI paints, checked at every boundary. */
+static void test_ping_grades(void)
+{
+    ping_t p;
+    memset(&p, 0, sizeof p);
+
+    /* Nothing resolved yet is not a verdict. */
+    p.sent = 1;
+    CHECK(ping_loss_grade(&p) == PING_GRADE_NONE);
+    CHECK(ping_rtt_grade(&p) == PING_GRADE_NONE);
+    CHECK(ping_grade(&p) == PING_GRADE_NONE);
+
+    /* Clean and fast: green. */
+    ping_record_reply(&p, 1.0);
+    CHECK(ping_loss_grade(&p) == PING_GRADE_GOOD);
+    CHECK(ping_rtt_grade(&p) == PING_GRADE_GOOD);
+    CHECK(ping_grade(&p) == PING_GRADE_GOOD);
+
+    /* A single dropped packet out of three is a warning, not a failure. */
+    p.sent = 3;
+    ping_record_reply(&p, 1.0);
+    ping_record_loss(&p);
+    CHECK(ping_loss_pct(&p) < PING_LOSS_BAD_PCT);
+    CHECK(ping_loss_grade(&p) == PING_GRADE_WARN);
+    CHECK(ping_grade(&p) == PING_GRADE_WARN);
+
+    /* Half the packets gone is a failure. */
+    ping_t half;
+    memset(&half, 0, sizeof half);
+    half.sent = 2;
+    ping_record_reply(&half, 1.0);
+    ping_record_loss(&half);
+    CHECK(ping_loss_pct(&half) == 50.0);
+    CHECK(ping_loss_grade(&half) == PING_GRADE_BAD);
+
+    /* Round trip tiers, checked either side of each threshold. */
+    ping_t r;
+    memset(&r, 0, sizeof r);
+    r.sent = 1;
+    ping_record_reply(&r, PING_RTT_WARN_MS - 0.01);
+    CHECK(ping_rtt_grade(&r) == PING_GRADE_GOOD);
+    memset(&r, 0, sizeof r);
+    r.sent = 1;
+    ping_record_reply(&r, PING_RTT_WARN_MS);
+    CHECK(ping_rtt_grade(&r) == PING_GRADE_WARN);
+    memset(&r, 0, sizeof r);
+    r.sent = 1;
+    ping_record_reply(&r, PING_RTT_BAD_MS);
+    CHECK(ping_rtt_grade(&r) == PING_GRADE_BAD);
+
+    /* No loss but a crawling link still grades red overall. */
+    CHECK(ping_loss_grade(&r) == PING_GRADE_GOOD);
+    CHECK(ping_grade(&r) == PING_GRADE_BAD);
+
+    /* A device that never answered at all. */
+    ping_t dead;
+    memset(&dead, 0, sizeof dead);
+    dead.sent = 1;
+    ping_record_loss(&dead);
+    CHECK(ping_grade(&dead) == PING_GRADE_BAD);
+
+    /* An error before anything was sent (no ICMP socket, no address). */
+    ping_t err;
+    memset(&err, 0, sizeof err);
+    err.error = xstrdup("ICMP not permitted");
+    CHECK(ping_loss_grade(&err) == PING_GRADE_BAD);
+    ping_reset(&err);
+}
+
+/* The neighbour table is the kernel's, so this checks the plumbing rather
+   than any particular contents: a dump must succeed and unknown addresses
+   must come back empty rather than confidently wrong. */
+static void test_neigh(void)
+{
+    neigh_cache_t *nc = neigh_new();
+    CHECK(nc != NULL);
+    neigh_refresh(nc);
+
+    addr_t bogus = v4(0, 0, 0, 1);
+    CHECK(neigh_lookup(nc, &bogus) == NULL);
+
+    /* Applying to an empty store must not touch anything. */
+    store_t s;
+    store_init(&s);
+    CHECK(neigh_apply(nc, &s) == 0);
+
+    /* A device whose address the kernel cannot know keeps an empty MAC. */
+    addr_t unseen = v4(198, 51, 100, 7);
+    device_t *d = store_device_for_addr(&s, &unseen, 1, SRC_MDNS);
+    neigh_apply(nc, &s);
+    CHECK_STR(d->mac, "");
+
+    store_free(&s);
+    neigh_destroy(nc);
+    neigh_destroy(NULL); /* must be a no-op */
+}
+
 static void test_xml(void)
 {
     static const char doc[] =
@@ -358,6 +462,8 @@ int main(void)
     test_label_fallbacks();
     test_binary_txt();
     test_ping_counters();
+    test_ping_grades();
+    test_neigh();
     test_xml();
     test_http_bad_urls();
     test_util();

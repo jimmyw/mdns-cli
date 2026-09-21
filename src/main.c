@@ -7,6 +7,7 @@
 #include "device.h"
 #include "fetcher.h"
 #include "mdns.h"
+#include "neigh.h"
 #include "net.h"
 #include "ping.h"
 #include "ssdp.h"
@@ -217,6 +218,8 @@ static void dump_json(store_t *store, FILE *f)
         fputs("],\n", f);
         fputs("      \"hostname\": ", f);
         json_str(f, d->hostname ? d->hostname : "");
+        fputs(",\n      \"mac\": ", f);
+        json_str(f, d->mac);
         fprintf(f, ",\n      \"sources\": ");
         json_str(f, src);
         fputs(",\n      \"services\": [", f);
@@ -287,10 +290,10 @@ static void on_fetch_request(void *ctx, const ssdp_entry_t *e)
     fetcher_request(hc->fetcher, e);
 }
 
-static const char *on_ping_request(void *ctx, device_t *d)
+static const char *on_ping_request(void *ctx, device_t *d, const addr_t *addr)
 {
     hook_ctx_t *hc = ctx;
-    return pinger_toggle(hc->pinger, d);
+    return pinger_toggle(hc->pinger, d, addr);
 }
 
 static uint64_t min_u64(uint64_t a, uint64_t b)
@@ -371,6 +374,7 @@ int main(int argc, char **argv)
                               : NULL;
     fetcher_t *fetcher = fetcher_new(&store, MAX_FETCHES);
     pinger_t *pinger = pinger_new(&store);
+    neigh_cache_t *neigh = neigh_new();
     hook_ctx_t hctx = {fetcher, pinger};
     ui_hooks_t hooks = {&hctx, on_fetch_request, on_ping_request};
     ui_t *ui = o.json ? NULL : ui_new(&store, &hooks);
@@ -381,6 +385,9 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
+
+    /* Populate MAC addresses once up front rather than after the first tick. */
+    neigh_refresh(neigh);
 
     const uint64_t start = now_ms();
     const uint64_t stop_at = o.timeout_s > 0 ? start + (uint64_t)(o.timeout_s * 1000) : UINT64_MAX;
@@ -526,6 +533,10 @@ int main(int argc, char **argv)
 
         if (now >= next_expire) {
             store_expire(&store, now, DROP_AFTER_MS);
+            /* The kernel learns a device's MAC from the discovery traffic it
+               already answered, so this only has to read the table back. */
+            neigh_refresh(neigh);
+            neigh_apply(neigh, &store);
             next_expire = now + EXPIRE_EVERY_MS;
         }
     }
@@ -537,6 +548,7 @@ int main(int argc, char **argv)
 
     fetcher_destroy(fetcher);
     pinger_destroy(pinger);
+    neigh_destroy(neigh);
     mdns_destroy(mdns);
     ssdp_destroy(ssdp);
     store_free(&store);

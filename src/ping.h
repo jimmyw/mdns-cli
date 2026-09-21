@@ -17,10 +17,12 @@ typedef struct pinger pinger_t;
 pinger_t *pinger_new(store_t *store);
 void pinger_destroy(pinger_t *p);
 
-/* Start pinging this device, or stop it if it is already running. Returns
-   NULL on success, or a short reason the ping could not start (which is also
-   recorded on the device). */
-const char *pinger_toggle(pinger_t *p, device_t *d);
+/* Start pinging this device, or stop it if it is already running. want picks
+   the address to probe; NULL means the one the list shows. Asking for a
+   different address than the run in progress retargets it rather than
+   stopping. Returns NULL on success, or a short reason it could not start
+   (which is also recorded on the device). */
+const char *pinger_toggle(pinger_t *p, device_t *d, const addr_t *want);
 void pinger_stop_all(pinger_t *p);
 size_t pinger_active(const pinger_t *p);
 

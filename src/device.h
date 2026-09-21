@@ -17,6 +17,7 @@
 
 #define MAX_ADDRS 8
 #define ADDR_STRLEN (INET6_ADDRSTRLEN + IF_NAMESIZE + 2)
+#define MAC_STRLEN 18 /* aa:bb:cc:dd:ee:ff */
 
 #define SRC_MDNS 0x1u
 #define SRC_SSDP 0x2u
@@ -101,6 +102,23 @@ typedef struct {
     char *error; /* why pinging could not start or had to stop */
 } ping_t;
 
+/* How healthy a ping looks, for anything that wants to say so in colour. */
+typedef enum {
+    PING_GRADE_NONE = 0, /* nothing has resolved yet: no verdict */
+    PING_GRADE_GOOD,
+    PING_GRADE_WARN,
+    PING_GRADE_BAD,
+} ping_grade_t;
+
+#define PING_LOSS_BAD_PCT 50.0 /* any loss below this is a warning */
+#define PING_RTT_WARN_MS 20.0
+#define PING_RTT_BAD_MS 150.0
+
+ping_grade_t ping_loss_grade(const ping_t *p);
+ping_grade_t ping_rtt_grade(const ping_t *p);
+/* The worse of the two, for a single at-a-glance verdict. */
+ping_grade_t ping_grade(const ping_t *p);
+
 void ping_reset(ping_t *p);
 void ping_record_reply(ping_t *p, double rtt_ms);
 void ping_record_loss(ping_t *p);
@@ -117,6 +135,7 @@ typedef struct device {
     addr_t addrs[MAX_ADDRS];
     size_t n_addrs;
     char *hostname;
+    char mac[MAC_STRLEN]; /* from the kernel's ARP/NDP table, "" when unknown */
     service_t *services;
     size_t n_services;
     ssdp_entry_t *ssdp;

@@ -16,6 +16,7 @@ mdns-cli  28 devices, 152 services            scanning  4s  sort:address  enp7s0
       addresses     192.168.2.66
       hostname      sonos000E58DDBF98.local
       seen          first 15:45:27, last 15:45:34 (2s ago)
+      mac           00:0e:58:dd:bf:98
       ping          192.168.2.66  18 sent, 18 received, 0% loss  (running, p to stop)
       rtt           last 0.43 ms, min 0.38, avg 0.51, max 1.24
   ▾ _sonos._tcp                      Sonos-000E58DDBF98:1443
@@ -55,16 +56,61 @@ No root is needed: port 5353 is bound with `SO_REUSEPORT`, so it coexists with
 | `↑` `↓` / `k` `j` | move |
 | `PgUp` `PgDn`, `Home` `End` / `g` `G` | page, first, last |
 | `Enter`, `Space` | fold open or closed |
-| `→` / `l` | fold open |
-| `←` / `h` | fold closed, or jump to the parent row |
+| `→` / `l` | fold open, then step through the values on the row |
+| `←` / `h` | step back through the values, then fold closed or jump to the parent |
 | `e` / `E` | expand all / collapse all |
-| `p` | ping the selected device; press again to stop |
+| `p` | ping the device, or the address picked with right/left; again to stop |
+| `c` | copy the value under the cursor to the clipboard |
 | `s` | cycle sort: address, name, last seen, source |
 | `/` | filter (matches names, addresses, service types, TXT and UPnP fields) |
 | `Esc` | clear the filter, then quit |
 | `r` | rescan now |
 | `?` | key list |
 | `q` | quit |
+
+## Picking a value
+
+A row often holds more than one thing worth having: a device with four
+addresses, a service with a host and a port. `→` steps through the values on
+the row (after opening the fold, if there is one) and `←` steps back, falling
+through to the usual collapse once it reaches the leftmost one. The picked
+value is underlined.
+
+`c` copies it. It goes to the clipboard through an OSC 52 escape sequence, so
+it works over SSH and inside tmux (with `set-clipboard on`), and also through
+`wl-copy`, `xclip` or `xsel` when one of those is installed.
+
+`p` acts on the picked value too: with an address selected it pings that one
+rather than the device's primary address, and picking a different address
+while a ping is running moves the ping to it.
+
+## Colour
+
+Colour carries information rather than decoration. Addresses are cyan, device
+names bold white, ports yellow, and each row is tagged by where it came from:
+green for mDNS, magenta for SSDP, cyan when a device was seen by both. Keys in
+key/value rows are blue, a device that has gone quiet turns amber, and a failed
+description fetch turns red.
+
+Ping is graded green / yellow / red, on the folded row as well as the expanded
+one:
+
+| | |
+| --- | --- |
+| green | replying, no loss, round trip under 20 ms |
+| yellow | some loss, or an average round trip of 20-150 ms |
+| red | half or more of the probes lost, no reply at all, or the ping could not start |
+
+The thresholds live next to the counters in `src/device.c` (`ping_loss_grade`,
+`ping_rtt_grade`), so they are one place to change and are covered by tests.
+
+Selected rows get a neutral dark grey background rather than reverse video,
+which would turn a multi-coloured line into a rainbow bar. The grey is
+deliberate: green, yellow, red and cyan all have to stay legible on top of it,
+and a coloured background (blue, say) leaves the green tags muddy. Terminals
+with fewer than 16 colours have no grey to spare and fall back to plain reverse
+video; without colour at all the UI uses bold, dim and reverse and stays
+readable.
 
 ## Options
 
@@ -120,8 +166,15 @@ running counters — sent, received, loss over resolved probes, and last / min /
 avg / max round trip — on the device entry itself. The counters stay on the
 entry after the run is stopped, and are visible folded as well as expanded. A
 probe still in flight is not counted as loss; one that passes its two-second
-timeout is. Both IPv4 and IPv6 targets work. If the kernel refuses an ICMP
+timeout is, and that timeout is a generous 12 seconds because sleepy
+Matter/Thread and battery devices only answer when they next wake up. Both
+IPv4 and IPv6 targets work. If the kernel refuses an ICMP
 socket, the reason is shown on the entry instead of the counters.
+
+**MAC addresses** (`src/neigh.c`) are not in any mDNS or SSDP payload. They
+come from the kernel's own ARP/NDP table, dumped over netlink (`RTM_GETNEIGH`,
+IPv4 and IPv6) every few seconds. Discovery traffic is usually enough to
+populate it; pinging a device certainly is.
 
 **Merging** (`src/device.c`) is by shared IP address, falling back to the mDNS
 hostname, and to the UPnP UUID — that last one is what joins the IPv4 and IPv6

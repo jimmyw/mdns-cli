@@ -43,6 +43,8 @@ add_library(mdnscli_core STATIC
   src/mdns.c
   src/ssdp.c
   src/ping.c
+  src/neigh.c
+  src/clip.c
   src/fetcher.c
 )
 target_include_directories(mdnscli_core PUBLIC src)

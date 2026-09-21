@@ -11,8 +11,12 @@
 #include <unistd.h>
 
 #define PING_INTERVAL_MS 1000u
-#define PING_TIMEOUT_MS 2000u
-#define MAX_OUTSTANDING 8 /* interval x timeout can never exceed this */
+/* Sleepy end devices (Matter/Thread, BLE bridges, battery sensors) only wake
+   on their own polling schedule, so an echo reply can take many seconds. A
+   short deadline would book those as loss when they were merely asleep. */
+#define PING_TIMEOUT_MS 12000u
+/* Must exceed timeout/interval so a probe is never evicted before it expires. */
+#define MAX_OUTSTANDING 16
 #define MAX_RUNS 16
 #define ECHO_PAYLOAD 24
 
@@ -134,15 +138,18 @@ static const addr_t *pick_target(const device_t *d)
     return d->n_addrs ? &d->addrs[0] : NULL;
 }
 
-const char *pinger_toggle(pinger_t *p, device_t *d)
+const char *pinger_toggle(pinger_t *p, device_t *d, const addr_t *want)
 {
     run_t *existing = find_run(p, d->id);
     if (existing) {
+        /* Pressing p again stops the run; picking another address moves it. */
+        bool retarget = want && !addr_equal(&existing->target, want);
         drop_run(p, existing);
-        return NULL;
+        if (!retarget)
+            return NULL;
     }
 
-    const addr_t *target = pick_target(d);
+    const addr_t *target = want ? want : pick_target(d);
     if (!target) {
         str_set(&d->ping.error, "no address to ping yet");
         store_touch(p->store);
