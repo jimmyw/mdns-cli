@@ -84,6 +84,33 @@ typedef struct ssdp_entry {
     char *udn;
 } ssdp_entry_t;
 
+/* Running ping counters, kept on the device entry so they survive folding,
+   sorting and re-merging. The accounting is pure (see ping_record_*), the
+   sockets live in ping.c. */
+typedef struct {
+    bool active; /* a ping run is sending right now */
+    char target[ADDR_STRLEN];
+    unsigned sent;
+    unsigned recv;
+    unsigned lost; /* probes that passed their timeout with no reply */
+    double last_ms;
+    double min_ms;
+    double max_ms;
+    double total_ms; /* sum of replies, for the average */
+    uint64_t started;
+    char *error; /* why pinging could not start or had to stop */
+} ping_t;
+
+void ping_reset(ping_t *p);
+void ping_record_reply(ping_t *p, double rtt_ms);
+void ping_record_loss(ping_t *p);
+/* Loss over resolved probes only: still-outstanding ones are not yet lost.
+   Returns -1 when nothing has resolved. */
+double ping_loss_pct(const ping_t *p);
+/* Mean round trip of the replies received, or -1 when there are none. */
+double ping_avg_ms(const ping_t *p);
+bool ping_has_data(const ping_t *p);
+
 typedef struct device {
     struct device *next;
     unsigned id;
@@ -98,6 +125,7 @@ typedef struct device {
     uint64_t first_seen;
     uint64_t last_seen;
     bool expanded;
+    ping_t ping;
 } device_t;
 
 typedef struct {

@@ -12,10 +12,12 @@ Move with the arrow keys, press **Enter** to fold a device open.
 mdns-cli  28 devices, 152 services            scanning  4s  sort:address  enp7s0
 ────────────────────────────────────────────────────────────────────────────────
 ▸ 192.168.2.48          brwd85de251589b.local        mDNS      3 services
-▾ 192.168.2.66          sonos000E58DDBF98.local      mDNS+SSDP 25 services
+▾ 192.168.2.66          sonos000E58DDBF98.local      mDNS+SSDP 25 services  ping 0.43ms 0%
       addresses     192.168.2.66
       hostname      sonos000E58DDBF98.local
       seen          first 15:45:27, last 15:45:34 (2s ago)
+      ping          192.168.2.66  18 sent, 18 received, 0% loss  (running, p to stop)
+      rtt           last 0.43 ms, min 0.38, avg 0.51, max 1.24
   ▾ _sonos._tcp                      Sonos-000E58DDBF98:1443
         host          sonos000E58DDBF98.local:1443
         info = /api/v1/players/RINCON_000E58DDBF9801400/info
@@ -56,6 +58,7 @@ No root is needed: port 5353 is bound with `SO_REUSEPORT`, so it coexists with
 | `→` / `l` | fold open |
 | `←` / `h` | fold closed, or jump to the parent row |
 | `e` / `E` | expand all / collapse all |
+| `p` | ping the selected device; press again to stop |
 | `s` | cycle sort: address, name, last seen, source |
 | `/` | filter (matches names, addresses, service types, TXT and UPnP fields) |
 | `Esc` | clear the filter, then quit |
@@ -108,6 +111,17 @@ only `LOCATION`, `ST`, `USN` and `SERVER`; folding an entry open fetches that
 `LOCATION` over HTTP (`src/http.c`, non-blocking) and reads `friendlyName`,
 `manufacturer`, `modelName`, `serialNumber` and `UDN` out of it
 (`src/xmlmini.c`).
+
+**Ping** (`src/ping.c`) is done in-process, not by shelling out to `ping(8)`.
+Linux hands out unprivileged ICMP datagram sockets
+(`net.ipv4.ping_group_range`), so `p` needs no root and no capabilities: it
+sends one echo request a second to the address shown for the device and keeps
+running counters — sent, received, loss over resolved probes, and last / min /
+avg / max round trip — on the device entry itself. The counters stay on the
+entry after the run is stopped, and are visible folded as well as expanded. A
+probe still in flight is not counted as loss; one that passes its two-second
+timeout is. Both IPv4 and IPv6 targets work. If the kernel refuses an ICMP
+socket, the reason is shown on the entry instead of the counters.
 
 **Merging** (`src/device.c`) is by shared IP address, falling back to the mDNS
 hostname, and to the UPnP UUID — that last one is what joins the IPv4 and IPv6

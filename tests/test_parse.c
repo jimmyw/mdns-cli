@@ -5,6 +5,7 @@
 #include "util.h"
 #include "xmlmini.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,6 +84,11 @@ static void test_merge(void)
     service_set_txt(sv, "ty=HP LaserJet", 14);
     CHECK_STR(sv->type, "_ipp._tcp");
 
+    /* Ping counters recorded before the merge must survive it. */
+    ping_record_reply(&host_dev->ping, 3.0);
+    host_dev->ping.sent = 1;
+    snprintf(host_dev->ping.target, sizeof host_dev->ping.target, "192.168.2.21");
+
     /* The A record arrives: the two sightings collapse into one device. */
     device_t *d = store_device_for_addr(&s, &a, now, SRC_MDNS);
     d = store_set_host(&s, d, "printer.local", now);
@@ -97,6 +103,10 @@ static void test_merge(void)
     char src[16];
     device_sources_str(d, src, sizeof src);
     CHECK_STR(src, "mDNS+SSDP");
+
+    CHECK(ping_has_data(&d->ping));
+    CHECK(d->ping.recv == 1);
+    CHECK_STR(d->ping.target, "192.168.2.21");
 
     /* The service survived the merge and is findable by fqdn. */
     device_t *owner = NULL;
@@ -185,6 +195,54 @@ static void test_binary_txt(void)
     CHECK(!str_is_printable("a\x01b", 3));
     CHECK(!str_is_printable("\xff\xfe", 2));
     store_free(&s);
+}
+
+/* Loss is counted over resolved probes only: a probe still in flight is not
+   yet a lost one, or every ping would start out looking 100% lossy. */
+static void test_ping_counters(void)
+{
+    ping_t p;
+    memset(&p, 0, sizeof p);
+    CHECK(!ping_has_data(&p));
+    CHECK(ping_loss_pct(&p) < 0);
+    CHECK(ping_avg_ms(&p) < 0);
+
+    p.sent = 1;
+    ping_record_reply(&p, 2.0);
+    CHECK(p.recv == 1);
+    CHECK(p.min_ms == 2.0 && p.max_ms == 2.0 && p.last_ms == 2.0);
+    CHECK(ping_avg_ms(&p) == 2.0);
+    CHECK(ping_loss_pct(&p) == 0.0);
+
+    p.sent = 2;
+    ping_record_reply(&p, 4.0);
+    CHECK(ping_avg_ms(&p) == 3.0);
+    CHECK(p.min_ms == 2.0 && p.max_ms == 4.0 && p.last_ms == 4.0);
+
+    p.sent = 3;
+    ping_record_loss(&p);
+    CHECK(fabs(ping_loss_pct(&p) - 100.0 / 3.0) < 0.001);
+
+    /* A fourth probe in flight must not move the loss figure. */
+    p.sent = 4;
+    CHECK(fabs(ping_loss_pct(&p) - 100.0 / 3.0) < 0.001);
+    CHECK(ping_has_data(&p));
+
+    /* Total loss reads as 100%, not as a missing value. */
+    ping_t dead;
+    memset(&dead, 0, sizeof dead);
+    dead.sent = 2;
+    ping_record_loss(&dead);
+    ping_record_loss(&dead);
+    CHECK(ping_loss_pct(&dead) == 100.0);
+    CHECK(ping_avg_ms(&dead) < 0);
+
+    p.error = xstrdup("boom");
+    ping_reset(&p);
+    CHECK(p.sent == 0 && p.recv == 0 && p.lost == 0);
+    CHECK(p.error == NULL);
+    CHECK(ping_loss_pct(&p) < 0);
+    CHECK(!ping_has_data(&p));
 }
 
 static void test_xml(void)
@@ -299,6 +357,7 @@ int main(void)
     test_merge();
     test_label_fallbacks();
     test_binary_txt();
+    test_ping_counters();
     test_xml();
     test_http_bad_urls();
     test_util();

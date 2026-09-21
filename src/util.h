@@ -10,6 +10,10 @@
 /* Milliseconds from CLOCK_MONOTONIC; the whole program schedules on this. */
 uint64_t now_ms(void);
 
+/* The same clock in microseconds. LAN round trips are routinely under a
+   millisecond, so ping timing needs the finer resolution. */
+uint64_t now_us(void);
+
 /* Wall-clock "HH:MM:SS" into out (needs >= 9 bytes). */
 void fmt_clock(uint64_t mono_ms, char *out, size_t outsz);
 

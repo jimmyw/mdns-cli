@@ -90,6 +90,46 @@ bool addr_equal(const addr_t *a, const addr_t *b)
     return true;
 }
 
+void ping_reset(ping_t *p)
+{
+    free(p->error);
+    memset(p, 0, sizeof *p);
+}
+
+void ping_record_reply(ping_t *p, double rtt_ms)
+{
+    p->recv++;
+    p->last_ms = rtt_ms;
+    if (p->recv == 1 || rtt_ms < p->min_ms)
+        p->min_ms = rtt_ms;
+    if (rtt_ms > p->max_ms)
+        p->max_ms = rtt_ms;
+    p->total_ms += rtt_ms;
+}
+
+void ping_record_loss(ping_t *p)
+{
+    p->lost++;
+}
+
+double ping_loss_pct(const ping_t *p)
+{
+    unsigned resolved = p->recv + p->lost;
+    if (resolved == 0)
+        return -1;
+    return 100.0 * (double)p->lost / (double)resolved;
+}
+
+double ping_avg_ms(const ping_t *p)
+{
+    return p->recv ? p->total_ms / (double)p->recv : -1;
+}
+
+bool ping_has_data(const ping_t *p)
+{
+    return p->sent > 0 || p->error != NULL;
+}
+
 void store_init(store_t *s)
 {
     memset(s, 0, sizeof *s);
@@ -153,6 +193,7 @@ static void device_free(device_t *d)
         e = next;
     }
     free(d->hostname);
+    free(d->ping.error);
     free(d);
 }
 
@@ -285,6 +326,12 @@ static device_t *device_merge(store_t *s, device_t *dst, device_t *src)
 
     dst->sources |= src->sources;
     dst->expanded = dst->expanded || src->expanded;
+    /* Keep whichever side was actually pinged. */
+    if (!ping_has_data(&dst->ping) && ping_has_data(&src->ping)) {
+        free(dst->ping.error);
+        dst->ping = src->ping;
+        memset(&src->ping, 0, sizeof src->ping);
+    }
     if (src->first_seen < dst->first_seen)
         dst->first_seen = src->first_seen;
     if (src->last_seen > dst->last_seen)

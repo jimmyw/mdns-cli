@@ -47,13 +47,13 @@ typedef struct {
     service_t *sv;
     ssdp_entry_t *e;
     bool stale;
-    int tag; /* color pair for the marker/kind, 0 for none */
+    int tag;      /* color pair for the marker/kind, 0 for none */
+    int value_cp; /* color pair for the value half of a kv row, 0 for none */
 } row_t;
 
 struct ui {
     store_t *store;
-    ui_fetch_cb fetch_cb;
-    void *fetch_ctx;
+    ui_hooks_t hooks;
 
     row_t *rows;
     size_t nrows, caprows;
@@ -214,6 +214,46 @@ static void build_ssdp_rows(ui_t *u, device_t *d, ssdp_entry_t *e, const cols_t 
     }
 }
 
+/* The ping counters live on the device entry, so they stay on screen after a
+   run is stopped and are there to compare against the next one. */
+static void build_ping_rows(ui_t *u, device_t *d)
+{
+    const ping_t *pg = &d->ping;
+    if (!ping_has_data(pg) && !pg->active) {
+        kv_row(u, d->id, 4, "ping", "ping", "not pinged yet - press p");
+        return;
+    }
+    if (pg->error && pg->sent == 0) {
+        kv_row(u, d->id, 4, "ping", "ping", "%s", pg->error);
+        u->rows[u->nrows - 1].value_cp = CP_STALE;
+        return;
+    }
+
+    double loss = ping_loss_pct(pg);
+    unsigned pending = pg->sent - pg->recv - pg->lost;
+    char extra[64] = "";
+    if (pending)
+        snprintf(extra, sizeof extra, ", %u in flight", pending);
+    char lossbuf[24];
+    if (loss < 0)
+        snprintf(lossbuf, sizeof lossbuf, "loss n/a");
+    else
+        snprintf(lossbuf, sizeof lossbuf, "%.0f%% loss", loss);
+    kv_row(u, d->id, 4, "ping", "ping", "%s  %u sent, %u received, %s%s  (%s)", pg->target,
+           pg->sent, pg->recv, lossbuf, extra, pg->active ? "running, p to stop" : "stopped");
+    if (loss > 0)
+        u->rows[u->nrows - 1].value_cp = CP_STALE;
+
+    if (pg->recv)
+        kv_row(u, d->id, 4, "rtt", "rtt", "last %.2f ms, min %.2f, avg %.2f, max %.2f",
+               pg->last_ms, pg->min_ms, ping_avg_ms(pg), pg->max_ms);
+    else
+        kv_row(u, d->id, 4, "rtt", "rtt", "%s", pg->active ? "waiting for the first reply"
+                                                           : "no reply");
+    if (pg->error && pg->sent)
+        kv_row(u, d->id, 4, "pingerr", "ping error", "%s", pg->error);
+}
+
 static void build_device_rows(ui_t *u, device_t *d, const cols_t *c)
 {
     row_t *r = row_add(u);
@@ -226,9 +266,18 @@ static void build_device_rows(ui_t *u, device_t *d, const cols_t *c)
 
     char src[16];
     device_sources_str(d, src, sizeof src);
-    char tail[64];
+    char tail[96];
     size_t n = d->n_services + d->n_ssdp;
-    snprintf(tail, sizeof tail, "%zu service%s", n, n == 1 ? "" : "s");
+    int tn = snprintf(tail, sizeof tail, "%zu service%s", n, n == 1 ? "" : "s");
+    if (tn > 0 && ping_has_data(&d->ping)) {
+        /* The whole point of the counters is to be readable while folded. */
+        double loss = ping_loss_pct(&d->ping);
+        if (d->ping.recv)
+            snprintf(tail + tn, sizeof tail - (size_t)tn, "   ping %.2fms %.0f%%",
+                     d->ping.last_ms, loss < 0 ? 0 : loss);
+        else
+            snprintf(tail + tn, sizeof tail - (size_t)tn, "   ping no reply");
+    }
 
     char acol[ADDR_STRLEN], fitted[ADDR_STRLEN], ncol[256];
     str_fit_addr(fitted, sizeof fitted, device_primary_addr(d), c->addrw);
@@ -253,6 +302,7 @@ static void build_device_rows(ui_t *u, device_t *d, const cols_t *c)
     fmt_clock(d->last_seen, last, sizeof last);
     fmt_age(u->now - d->last_seen, age, sizeof age);
     kv_row(u, d->id, 4, "seen", "seen", "first %s, last %s (%s ago)", first, last, age);
+    build_ping_rows(u, d);
 
     for (service_t *sv = d->services; sv; sv = sv->next)
         build_service_rows(u, d, sv, c);
@@ -320,15 +370,18 @@ static void remember_sel(ui_t *u)
 
 /* ------------------------------------------------------------- lifecycle */
 
-ui_t *ui_new(store_t *store, ui_fetch_cb cb, void *ctx)
+ui_t *ui_new(store_t *store, const ui_hooks_t *hooks)
 {
     ui_t *u = xcalloc(1, sizeof *u);
     u->store = store;
-    u->fetch_cb = cb;
-    u->fetch_ctx = ctx;
+    if (hooks)
+        u->hooks = *hooks;
     u->dirty = true;
 
     setlocale(LC_ALL, "");
+    /* Wide characters follow the user's locale, numbers do not: a round trip
+       reads as 1.25 ms everywhere, not 1,25 ms on some machines. */
+    setlocale(LC_NUMERIC, "C");
     initscr();
     cbreak();
     noecho();
@@ -383,10 +436,10 @@ static void move_sel(ui_t *u, int delta)
 
 static void request_fetches_for_device(ui_t *u, device_t *d)
 {
-    if (!u->fetch_cb)
+    if (!u->hooks.fetch)
         return;
     for (ssdp_entry_t *e = d->ssdp; e; e = e->next)
-        u->fetch_cb(u->fetch_ctx, e);
+        u->hooks.fetch(u->hooks.ctx, e);
 }
 
 static void toggle_row(ui_t *u, bool expand_only)
@@ -408,8 +461,8 @@ static void toggle_row(ui_t *u, bool expand_only)
         break;
     case ROW_SSDP:
         r->e->expanded = expand_only ? true : !r->e->expanded;
-        if (r->e->expanded && u->fetch_cb)
-            u->fetch_cb(u->fetch_ctx, r->e);
+        if (r->e->expanded && u->hooks.fetch)
+            u->hooks.fetch(u->hooks.ctx, r->e);
         break;
     default:
         return;
@@ -438,6 +491,19 @@ static void collapse_or_parent(ui_t *u)
             remember_sel(u);
             return;
         }
+}
+
+/* p pings whatever device the cursor is on, from any of its rows. */
+static void ping_selected(ui_t *u)
+{
+    if (u->sel >= u->nrows || !u->hooks.ping)
+        return;
+    device_t *d = store_find_id(u->store, u->rows[u->sel].dev_id);
+    if (!d)
+        return;
+    u->hooks.ping(u->hooks.ctx, d);
+    d->expanded = true; /* so the counters are visible straight away */
+    u->dirty = true;
 }
 
 static void expand_all(ui_t *u, bool on)
@@ -554,6 +620,9 @@ ui_action_t ui_key(ui_t *u, int ch)
     case '/':
         u->filter_editing = true;
         break;
+    case 'p':
+        ping_selected(u);
+        break;
     case 'r':
         return UI_RESCAN;
     case '?':
@@ -579,12 +648,14 @@ static void draw_help(void)
         "  right / l         fold open",
         "  left / h          fold closed, or go to parent",
         "  e / E             expand all / collapse all",
+        "  p                 ping this device (press again to stop)",
         "  s                 cycle sort order",
         "  /                 filter (Esc clears)",
         "  r                 rescan now",
         "  q                 quit",
         "",
         "  Expanding a UPnP entry fetches its description over HTTP.",
+        "  Ping runs once a second and counts loss and round trip.",
         "  Press any key to close.",
     };
     size_t n = sizeof lines / sizeof lines[0];
@@ -640,8 +711,13 @@ static void draw_row(ui_t *u, const row_t *r, int y, bool selected)
         mvaddnstr(y, x, r->text, llen);
         if (u->has_color && !selected)
             attroff(COLOR_PAIR(CP_LABEL));
-        if (avail > llen)
+        if (avail > llen) {
+            if (u->has_color && r->value_cp && !selected)
+                attron(COLOR_PAIR(r->value_cp));
             mvaddnstr(y, x + llen, r->text + llen, avail - llen);
+            if (u->has_color && r->value_cp && !selected)
+                attroff(COLOR_PAIR(r->value_cp));
+        }
     } else {
         mvaddnstr(y, x, r->text, avail);
     }
@@ -711,7 +787,8 @@ void ui_draw(ui_t *u, const ui_status_t *st)
                  u->ndevices_shown, st->n_devices);
     else
         snprintf(foot, sizeof foot,
-                 "[enter] fold  [e/E] all  [s] sort  [/] filter  [r] rescan  [?] keys  [q] quit%s",
+                 "[enter] fold  [p] ping  [e/E] all  [s] sort  [/] filter  [r] rescan  [?] keys  "
+                 "[q] quit%s",
                  st->inflight ? "  (fetching)" : "");
     if (u->has_color)
         attron(COLOR_PAIR(CP_DIM) | A_DIM);

@@ -42,6 +42,7 @@ add_library(mdnscli_core STATIC
   src/xmlmini.c
   src/mdns.c
   src/ssdp.c
+  src/ping.c
   src/fetcher.c
 )
 target_include_directories(mdnscli_core PUBLIC src)

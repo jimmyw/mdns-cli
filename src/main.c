@@ -8,6 +8,7 @@
 #include "fetcher.h"
 #include "mdns.h"
 #include "net.h"
+#include "ping.h"
 #include "ssdp.h"
 #include "ui.h"
 #include "util.h"
@@ -277,12 +278,19 @@ static void dump_json(store_t *store, FILE *f)
 
 typedef struct {
     fetcher_t *fetcher;
-} fetch_ctx_t;
+    pinger_t *pinger;
+} hook_ctx_t;
 
 static void on_fetch_request(void *ctx, const ssdp_entry_t *e)
 {
-    fetch_ctx_t *fc = ctx;
-    fetcher_request(fc->fetcher, e);
+    hook_ctx_t *hc = ctx;
+    fetcher_request(hc->fetcher, e);
+}
+
+static const char *on_ping_request(void *ctx, device_t *d)
+{
+    hook_ctx_t *hc = ctx;
+    return pinger_toggle(hc->pinger, d);
 }
 
 static uint64_t min_u64(uint64_t a, uint64_t b)
@@ -362,8 +370,10 @@ int main(int argc, char **argv)
     ssdp_t *ssdp = o.use_ssdp ? ssdp_new(&store, ifs, (size_t)nifs, ssdp4_search, ssdp6_search)
                               : NULL;
     fetcher_t *fetcher = fetcher_new(&store, MAX_FETCHES);
-    fetch_ctx_t fctx = {fetcher};
-    ui_t *ui = o.json ? NULL : ui_new(&store, on_fetch_request, &fctx);
+    pinger_t *pinger = pinger_new(&store);
+    hook_ctx_t hctx = {fetcher, pinger};
+    ui_hooks_t hooks = {&hctx, on_fetch_request, on_ping_request};
+    ui_t *ui = o.json ? NULL : ui_new(&store, &hooks);
 
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -410,7 +420,7 @@ int main(int argc, char **argv)
             next_draw = now + UI_TICK_MS;
         }
 
-        struct pollfd pfd[8 + MAX_FETCHES];
+        struct pollfd pfd[8 + MAX_FETCHES + 2];
         size_t n = 0;
         int idx_stdin = -1, idx_mdns4 = -1, idx_mdns6 = -1;
         int idx_s4l = -1, idx_s4s = -1, idx_s6l = -1, idx_s6s = -1;
@@ -438,6 +448,8 @@ int main(int argc, char **argv)
 #undef ADD
         size_t fetch_base = n;
         n += fetcher_pollfds(fetcher, pfd + n, MAX_FETCHES);
+        size_t ping_base = n;
+        n += pinger_pollfds(pinger, pfd + n, 2);
 
         uint64_t deadline = min_u64(stop_at, next_expire);
         if (o.json && o.descriptions)
@@ -449,6 +461,7 @@ int main(int argc, char **argv)
         if (ssdp)
             deadline = min_u64(deadline, ssdp_next_deadline(ssdp));
         deadline = min_u64(deadline, fetcher_next_deadline(fetcher));
+        deadline = min_u64(deadline, pinger_next_deadline(pinger));
 
         now = now_ms();
         int wait_ms = deadline == UINT64_MAX ? 1000 : (int)(deadline > now ? deadline - now : 0);
@@ -509,6 +522,7 @@ int main(int argc, char **argv)
         }
 
         fetcher_step(fetcher, pfd + fetch_base, n - fetch_base, now);
+        pinger_step(pinger, pfd + ping_base, n - ping_base, now);
 
         if (now >= next_expire) {
             store_expire(&store, now, DROP_AFTER_MS);
@@ -522,6 +536,7 @@ int main(int argc, char **argv)
         dump_json(&store, stdout);
 
     fetcher_destroy(fetcher);
+    pinger_destroy(pinger);
     mdns_destroy(mdns);
     ssdp_destroy(ssdp);
     store_free(&store);

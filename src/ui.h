@@ -8,9 +8,16 @@
 
 typedef struct ui ui_t;
 
-/* Called when the user expands something whose UPnP description is worth
-   fetching. The UI never blocks on it; the result shows up on a later draw. */
-typedef void (*ui_fetch_cb)(void *ctx, const ssdp_entry_t *e);
+/* What the UI asks the rest of the program to do. Both are non-blocking: the
+   results turn up on the device entry and show up on a later draw. */
+typedef struct {
+    void *ctx;
+    /* The user expanded something whose UPnP description is worth fetching. */
+    void (*fetch)(void *ctx, const ssdp_entry_t *e);
+    /* The user pressed p: start pinging this device, or stop if it already is.
+       Returns NULL, or a short reason it could not start. */
+    const char *(*ping)(void *ctx, device_t *d);
+} ui_hooks_t;
 
 typedef struct {
     bool scanning;
@@ -27,7 +34,7 @@ typedef enum {
     UI_RESCAN,
 } ui_action_t;
 
-ui_t *ui_new(store_t *store, ui_fetch_cb cb, void *ctx);
+ui_t *ui_new(store_t *store, const ui_hooks_t *hooks);
 void ui_destroy(ui_t *u);
 
 #define UI_KEY_NONE (-1)

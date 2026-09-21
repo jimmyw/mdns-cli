@@ -16,6 +16,13 @@ uint64_t now_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
+uint64_t now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
+}
+
 void fmt_clock(uint64_t mono_ms, char *out, size_t outsz)
 {
     /* Translate a monotonic stamp back onto the wall clock for display. */
