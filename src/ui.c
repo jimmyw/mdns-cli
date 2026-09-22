@@ -796,7 +796,6 @@ static void ping_selected(ui_t *u)
         return;
     const target_t *t = u->sel_target >= 0 ? current_target(u) : NULL;
     u->hooks.ping(u->hooks.ctx, d, (t && t->is_addr) ? &t->addr : NULL);
-    d->expanded = true; /* so the counters are visible straight away */
     u->dirty = true;
 }
 
