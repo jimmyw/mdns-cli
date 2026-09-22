@@ -2,6 +2,12 @@
 #ifndef MDNS_CLI_NET_H
 #define MDNS_CLI_NET_H
 
+#ifdef __APPLE__
+/* Must be set before <netinet/in.h> pulls in netinet6/in6.h: Darwin hides the
+   RFC 3542 API (IPV6_RECVPKTINFO and friends) behind this by default. */
+#define __APPLE_USE_RFC_3542
+#endif
+
 #include <net/if.h>
 #include <netinet/in.h>
 #include <stdbool.h>
@@ -44,5 +50,10 @@ ssize_t net_send_v4(int fd, const iface_t *ifc, const void *buf, size_t len, con
                     uint16_t port);
 ssize_t net_send_v6(int fd, const iface_t *ifc, const void *buf, size_t len, const char *group,
                     uint16_t port);
+
+/* socket(2) with the close-on-exec and non-blocking flags already applied.
+   Linux sets them atomically via SOCK_CLOEXEC/SOCK_NONBLOCK; other platforms
+   (e.g. macOS) don't have those flags, so fall back to fcntl(). */
+int net_socket(int domain, int type, int protocol);
 
 #endif /* MDNS_CLI_NET_H */

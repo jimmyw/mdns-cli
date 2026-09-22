@@ -4,12 +4,28 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <ifaddrs.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+int net_socket(int domain, int type, int protocol)
+{
+#if defined(SOCK_CLOEXEC) && defined(SOCK_NONBLOCK)
+    return socket(domain, type | SOCK_CLOEXEC | SOCK_NONBLOCK, protocol);
+#else
+    int fd = socket(domain, type, protocol);
+    if (fd < 0)
+        return -1;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, (flags < 0 ? 0 : flags) | O_NONBLOCK);
+    return fd;
+#endif
+}
 
 static bool name_wanted(const char *name, char *const *filter, size_t nfilter)
 {
@@ -98,7 +114,7 @@ static int set_reuse(int fd)
 
 int net_open_v4(uint16_t bind_port, const char *group, const iface_t *ifs, size_t n, bool join)
 {
-    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    int fd = net_socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0)
         return -1;
     if (set_reuse(fd) != 0)
@@ -124,11 +140,10 @@ int net_open_v4(uint16_t bind_port, const char *group, const iface_t *ifs, size_
         for (size_t i = 0; i < n; i++) {
             if (!ifs[i].has_v4)
                 continue;
-            struct ip_mreqn mreq;
+            struct ip_mreq mreq;
             memset(&mreq, 0, sizeof mreq);
             mreq.imr_multiaddr = ga;
-            mreq.imr_address = ifs[i].v4;
-            mreq.imr_ifindex = (int)ifs[i].index;
+            mreq.imr_interface = ifs[i].v4;
             if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof mreq) != 0)
                 log_msg("v4 join %s on %s failed: %s", group, ifs[i].name, strerror(errno));
             else
@@ -149,7 +164,7 @@ fail: {
 
 int net_open_v6(uint16_t bind_port, const char *group, const iface_t *ifs, size_t n, bool join)
 {
-    int fd = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    int fd = net_socket(AF_INET6, SOCK_DGRAM, 0);
     if (fd < 0)
         return -1;
     int on = 1;
@@ -202,11 +217,7 @@ fail: {
 ssize_t net_send_v4(int fd, const iface_t *ifc, const void *buf, size_t len, const char *group,
                     uint16_t port)
 {
-    struct ip_mreqn req;
-    memset(&req, 0, sizeof req);
-    req.imr_address = ifc->v4;
-    req.imr_ifindex = (int)ifc->index;
-    if (setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &req, sizeof req) != 0)
+    if (setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &ifc->v4, sizeof ifc->v4) != 0)
         return -1;
 
     struct sockaddr_in dst;

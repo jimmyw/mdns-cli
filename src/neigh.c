@@ -3,16 +3,23 @@
 #include "util.h"
 
 #include <errno.h>
-#include <linux/netlink.h>
-#include <linux/rtnetlink.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#ifdef __linux__
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#else
+#include <net/if_dl.h>
+#include <net/route.h>
+#include <netinet/in.h>
+#include <sys/sysctl.h>
+#endif
+
 #define MAC_STRLEN 18
-#define DUMP_TIMEOUT_MS 150
 
 typedef struct {
     addr_t addr;
@@ -50,6 +57,10 @@ static void add_entry(neigh_cache_t *nc, const addr_t *a, const uint8_t *lladdr,
     snprintf(e->mac, sizeof e->mac, "%02x:%02x:%02x:%02x:%02x:%02x", lladdr[0], lladdr[1],
              lladdr[2], lladdr[3], lladdr[4], lladdr[5]);
 }
+
+#ifdef __linux__
+
+#define DUMP_TIMEOUT_MS 150
 
 static void parse_neigh(neigh_cache_t *nc, const struct nlmsghdr *nh)
 {
@@ -146,6 +157,89 @@ void neigh_refresh(neigh_cache_t *nc)
     }
     close(fd);
 }
+
+#else /* BSD / macOS: no netlink, so read the routing table's ARP/NDP entries. */
+
+/* Sockaddrs returned by the routing socket API are padded to a long boundary
+   (an empty one still takes one long's worth of space). */
+#define RTSOCK_ROUNDUP(a) ((a) > 0 ? (1 + (((a)-1) | (sizeof(long) - 1))) : sizeof(long))
+
+static void scan_family(neigh_cache_t *nc, int af)
+{
+    int mib[6] = {CTL_NET, PF_ROUTE, 0, af, NET_RT_FLAGS, RTF_LLINFO};
+    size_t needed = 0;
+    if (sysctl(mib, 6, NULL, &needed, NULL, 0) != 0) {
+        log_msg("neigh: sysctl size (af %d): %s", af, strerror(errno));
+        return;
+    }
+    if (needed == 0)
+        return;
+
+    char *buf = xmalloc(needed);
+    if (sysctl(mib, 6, buf, &needed, NULL, 0) != 0) {
+        log_msg("neigh: sysctl dump (af %d): %s", af, strerror(errno));
+        free(buf);
+        return;
+    }
+
+    for (char *next = buf; next < buf + needed;) {
+        struct rt_msghdr *rtm = (struct rt_msghdr *)next;
+        if (rtm->rtm_msglen == 0)
+            break;
+        next += rtm->rtm_msglen;
+
+        struct sockaddr *rti_info[RTAX_MAX];
+        struct sockaddr *sa = (struct sockaddr *)(rtm + 1);
+        for (int i = 0; i < RTAX_MAX; i++) {
+            if (rtm->rtm_addrs & (1 << i)) {
+                rti_info[i] = sa;
+                sa = (struct sockaddr *)((char *)sa + RTSOCK_ROUNDUP(sa->sa_len));
+            } else {
+                rti_info[i] = NULL;
+            }
+        }
+
+        struct sockaddr *dst = rti_info[RTAX_DST];
+        struct sockaddr *gw = rti_info[RTAX_GATEWAY];
+        if (!dst || !gw || gw->sa_family != AF_LINK)
+            continue;
+        struct sockaddr_dl *sdl = (struct sockaddr_dl *)gw;
+        if (sdl->sdl_alen != 6)
+            continue;
+        const uint8_t *lladdr = (const uint8_t *)LLADDR(sdl);
+
+        addr_t a;
+        if (af == AF_INET) {
+            struct sockaddr_in *sin = (struct sockaddr_in *)dst;
+            if (!addr_from_v4(&a, (const uint8_t *)&sin->sin_addr))
+                continue;
+        } else {
+            struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)dst;
+            struct in6_addr addr6 = sin6->sin6_addr;
+            /* The kernel embeds the outgoing interface index in bytes 2-3 of
+               a link-local address handed back over a routing socket; strip
+               it back out and carry the real scope separately. */
+            unsigned scope = (unsigned)rtm->rtm_index;
+            if (IN6_IS_ADDR_LINKLOCAL(&addr6)) {
+                addr6.s6_addr[2] = 0;
+                addr6.s6_addr[3] = 0;
+            }
+            if (!addr_from_v6(&a, (const uint8_t *)&addr6, scope))
+                continue;
+        }
+        add_entry(nc, &a, lladdr, sdl->sdl_alen);
+    }
+    free(buf);
+}
+
+void neigh_refresh(neigh_cache_t *nc)
+{
+    nc->n = 0;
+    scan_family(nc, AF_INET);
+    scan_family(nc, AF_INET6);
+}
+
+#endif
 
 const char *neigh_lookup(const neigh_cache_t *nc, const addr_t *a)
 {

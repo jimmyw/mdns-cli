@@ -32,7 +32,10 @@ mdns-cli  28 devices, 152 services            scanning  4s  sort:address  enp7s0
 
 ## Build
 
-Needs CMake ≥ 3.16, a C11 compiler and ncursesw.
+Needs CMake ≥ 3.16, a C11 compiler and ncursesw. Builds on Linux and macOS
+(on macOS, install ncurses via Homebrew if pkg-config can't find `ncursesw`:
+`brew install ncurses` and pass `-DCMAKE_PREFIX_PATH=$(brew --prefix ncurses)`
+if needed).
 
 ```sh
 cmake -B build
@@ -47,7 +50,9 @@ sudo cmake --install build                                 # optional
 ```
 
 No root is needed: port 5353 is bound with `SO_REUSEPORT`, so it coexists with
-`avahi-daemon`, and the SSDP search uses an ephemeral port of its own.
+`avahi-daemon`, and the SSDP search uses an ephemeral port of its own. The
+neighbour table (MAC addresses) is read via netlink on Linux and via the
+routing socket (`sysctl(NET_RT_FLAGS)`) on macOS.
 
 ## Keys
 

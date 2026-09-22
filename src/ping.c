@@ -1,5 +1,6 @@
 #include "ping.h"
 
+#include "net.h"
 #include "util.h"
 
 #include <errno.h>
@@ -89,11 +90,15 @@ static int socket_for(pinger_t *p, int family, const char **why)
     }
     *tried = true;
     int proto = family == AF_INET ? IPPROTO_ICMP : IPPROTO_ICMPV6;
-    *fd = socket(family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, proto);
+    *fd = net_socket(family, SOCK_DGRAM, proto);
     if (*fd < 0) {
         log_msg("ping: socket(%s): %s", family == AF_INET ? "icmp" : "icmpv6", strerror(errno));
         *why = (errno == EACCES || errno == EPERM)
+#ifdef __linux__
                    ? "ICMP not permitted (see net.ipv4.ping_group_range)"
+#else
+                   ? "ICMP not permitted"
+#endif
                    : strerror(errno);
         return -1;
     }

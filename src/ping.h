@@ -1,8 +1,9 @@
 /* ICMP echo, in-process and inside the main poll loop.
  *
- * Linux hands out unprivileged ICMP datagram sockets (net.ipv4.ping_group_range),
- * so no root, no capabilities and no ping(8) subprocess: the echo requests are
- * built and matched here, and the counters land on the device entry.
+ * Linux and macOS both hand out unprivileged ICMP datagram sockets (Linux
+ * gates this on net.ipv4.ping_group_range; macOS allows it unconditionally),
+ * so no root, no capabilities and no ping(8) subprocess: the echo requests
+ * are built and matched here, and the counters land on the device entry.
  */
 #ifndef MDNS_CLI_PING_H
 #define MDNS_CLI_PING_H

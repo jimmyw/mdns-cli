@@ -1,5 +1,6 @@
 #include "http.h"
 
+#include "net.h"
 #include "util.h"
 
 #include <arpa/inet.h>
@@ -167,7 +168,7 @@ static bool start_connect(http_req_t *r)
         return false;
     }
 
-    r->fd = socket(ss.ss_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    r->fd = net_socket(ss.ss_family, SOCK_STREAM, 0);
     if (r->fd < 0) {
         fail(r, strerror(errno));
         return false;

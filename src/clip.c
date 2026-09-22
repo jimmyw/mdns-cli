@@ -125,6 +125,10 @@ const char *clip_copy(const char *text)
 
     osc52(text);
 
+#ifdef __APPLE__
+    if (spawn_helper("pbcopy", NULL, text))
+        return "clipboard";
+#else
     if (getenv("WAYLAND_DISPLAY") && spawn_helper("wl-copy", NULL, text))
         return "clipboard";
     if (getenv("DISPLAY")) {
@@ -133,6 +137,7 @@ const char *clip_copy(const char *text)
         if (spawn_helper("xsel", "--clipboard", text))
             return "clipboard";
     }
+#endif
     /* No helper: the terminal may still have taken the OSC 52 sequence. */
     return "terminal";
 }
