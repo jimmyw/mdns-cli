@@ -9,6 +9,7 @@
 #include "mdns.h"
 #include "neigh.h"
 #include "net.h"
+#include "oui.h"
 #include "ping.h"
 #include "ssdp.h"
 #include "ui.h"
@@ -220,6 +221,13 @@ static void dump_json(store_t *store, FILE *f)
         json_str(f, d->hostname ? d->hostname : "");
         fputs(",\n      \"mac\": ", f);
         json_str(f, d->mac);
+        const char *vendor = "";
+        if (d->mac[0] && oui_loaded())
+            vendor = oui_vendor_str(d->mac);
+        if (vendor == NULL)
+            vendor = "";
+        fputs(",\n      \"vendor\": ", f);
+        json_str(f, vendor);
         fprintf(f, ",\n      \"sources\": ");
         json_str(f, src);
         fputs(",\n      \"services\": [", f);
@@ -378,6 +386,7 @@ int main(int argc, char **argv)
     hook_ctx_t hctx = {fetcher, pinger};
     ui_hooks_t hooks = {&hctx, on_fetch_request, on_ping_request};
     ui_t *ui = o.json ? NULL : ui_new(&store, &hooks);
+    oui_load(NULL);
 
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -549,6 +558,7 @@ int main(int argc, char **argv)
     fetcher_destroy(fetcher);
     pinger_destroy(pinger);
     neigh_destroy(neigh);
+    oui_free();
     mdns_destroy(mdns);
     ssdp_destroy(ssdp);
     store_free(&store);

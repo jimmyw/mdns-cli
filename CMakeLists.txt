@@ -45,6 +45,7 @@ add_library(mdnscli_core STATIC
   src/ping.c
   src/neigh.c
   src/clip.c
+  src/oui.c
   src/fetcher.c
 )
 target_include_directories(mdnscli_core PUBLIC src)
@@ -60,7 +61,15 @@ else()
 endif()
 
 include(GNUInstallDirs)
+# The OUI vendor DB is program data, so it lives in <prefix>/share/<pkg>/ (not
+# bin/). It's copied next to the binary in the build tree; at install time the
+# binary resolves it from <exedir>/../share/<pkg>/oui.bin after failing on
+# <exedir>/oui.bin. Override at runtime with the MDNS_OUI env var.
+file(COPY data/oui.bin DESTINATION ${CMAKE_BINARY_DIR})
 install(TARGETS mdns-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+# DB goes in <prefix>/share/<pkg>/ (program data, not bin/). The DB filename
+# and <pkg> here must match the path suffixes searched in src/oui.c.
+install(FILES data/oui.bin DESTINATION share/${PROJECT_NAME})
 
 enable_testing()
 add_executable(test_dns tests/test_dns.c)

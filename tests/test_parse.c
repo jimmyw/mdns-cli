@@ -3,6 +3,7 @@
 #include "device.h"
 #include "http.h"
 #include "neigh.h"
+#include "oui.h"
 #include "util.h"
 #include "xmlmini.h"
 
@@ -10,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int failures;
 
@@ -455,6 +457,80 @@ static void test_util(void)
     CHECK(!str_icontains(NULL, "x"));
 }
 
+/* Longest-prefix match over the three OUI prefix lengths, against a hand-
+ * built database (the string table is shared by all three tiers). */
+static void test_oui_lookup(void)
+{
+    static char strtab[] = "Alpha\0Beta\0Gamma\0";
+    static oui_entry_t e24[1] = { {0x010203, 0, 5} };
+    static oui_entry_t e28[1] = { {0x01020300, 6, 4} };
+    static oui_entry_t e36[1] = { {0x0102030400, 11, 5} };
+    oui_db_t db = { .e24 = e24, .n24 = 1,
+                    .e28 = e28, .n28 = 1,
+                    .e36 = e36, .n36 = 1,
+                    .strtab = strtab, .strtab_size = (uint32_t)(sizeof strtab - 1) };
+    uint8_t m36[] = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 };
+    uint8_t m28[] = { 0x01, 0x02, 0x03, 0x00, 0x05, 0x06 };
+    uint8_t m24[] = { 0x01, 0x02, 0x03, 0x99, 0x00, 0x00 };
+    uint8_t m0[] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    CHECK_STR(oui_lookup_bytes(&db, m36, 6), "Gamma"); /* 36-bit wins */
+    CHECK_STR(oui_lookup_bytes(&db, m28, 6), "Beta");  /* 28-bit */
+    CHECK_STR(oui_lookup_bytes(&db, m24, 6), "Alpha"); /* 24-bit */
+    CHECK(oui_lookup_bytes(&db, m0, 6) == NULL);
+    CHECK(oui_lookup_bytes(NULL, m36, 6) == NULL);
+    CHECK(oui_lookup_bytes(&db, (uint8_t[]){ 0x01, 0x02 }, 2) == NULL);
+}
+
+/* A minimal oui.bin built by hand, loaded through the public API and looked
+ * up via the MAC-string helper (which parses the string and chooses the tier). */
+static void test_oui_load(void)
+{
+    static const uint8_t file[] = {
+        /* header: magic, ver, n24, n28, n36, strtab_size, strtab_off, pad */
+        0x4f, 0x55, 0x49, 0x31,  /* "OUI1" */
+        0x01, 0x00, 0x00, 0x00,  /* ver 1 */
+        0x01, 0x00, 0x00, 0x00,  /* n24 */
+        0x01, 0x00, 0x00, 0x00,  /* n28 */
+        0x01, 0x00, 0x00, 0x00,  /* n36 */
+        0x11, 0x00, 0x00, 0x00,  /* strtab_size = 17 */
+        0x50, 0x00, 0x00, 0x00,  /* strtab_off  = 80 */
+        0x00, 0x00, 0x00, 0x00,
+        /* e24 key=0x010203  off=0  len=5 */
+        0x03, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x05, 0x00, 0x00, 0x00,
+        /* e28 key=0x01020300  off=6  len=4 */
+        0x00, 0x03, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x06, 0x00, 0x00, 0x00,
+        0x04, 0x00, 0x00, 0x00,
+        /* e36 key=0x0102030400  off=11  len=5 */
+        0x00, 0x04, 0x03, 0x02, 0x01, 0x00, 0x00, 0x00,
+        0x0b, 0x00, 0x00, 0x00,
+        0x05, 0x00, 0x00, 0x00,
+        /* strtab: Alpha\0Beta\0Gamma\0 */
+        'A', 'l', 'p', 'h', 'a', 0,
+        'B', 'e', 't', 'a', 0,
+        'G', 'a', 'm', 'm', 'a', 0
+    };
+    const char *path = "/tmp/mdnscli_oui_test.bin";
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL);
+    if (f) {
+        size_t n = fwrite(file, 1, sizeof file, f);
+        CHECK(n == sizeof file);
+        fclose(f);
+    }
+    CHECK(oui_load(path));
+    CHECK(oui_loaded());
+    CHECK_STR(oui_vendor_str("01:02:03:04:05:06"), "Gamma"); /* 36-bit */
+    CHECK_STR(oui_vendor_str("01:02:03:00:05:06"), "Beta");  /* 28-bit */
+    CHECK_STR(oui_vendor_str("01:02:03:99:00:00"), "Alpha"); /* 24-bit */
+    CHECK(oui_vendor_str("ff:ff:ff:ff:ff:ff") == NULL); /* unknown */
+    CHECK(oui_vendor_str("01:02") == NULL);             /* too short */
+    oui_free();
+    unlink(path);
+}
+
 int main(void)
 {
     test_addr();
@@ -467,6 +543,8 @@ int main(void)
     test_xml();
     test_http_bad_urls();
     test_util();
+    test_oui_lookup();
+    test_oui_load();
     if (failures)
         printf("%d check(s) failed\n", failures);
     else

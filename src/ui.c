@@ -1,6 +1,7 @@
 #include "ui.h"
 
 #include "clip.h"
+#include "oui.h"
 #include "util.h"
 
 #include <ctype.h>
@@ -532,6 +533,11 @@ static void build_device_rows(ui_t *u, device_t *d, const cols_t *c)
     if (d->mac[0]) {
         kv_row(u, d->id, 4, "mac", "mac", "%s", d->mac);
         kv_value_color(u, CP_PORT, 0);
+        if (oui_loaded()) {
+            const char *vendor = oui_vendor_str(d->mac);
+            kv_row(u, d->id, 4, "vendor", "vendor", "%s", vendor ? vendor : "(unknown)");
+            kv_value_color(u, CP_NAME, 0);
+        }
     }
     if (d->hostname) {
         kv_row(u, d->id, 4, "host", "hostname", "%s", d->hostname);

@@ -3,3 +3,7 @@ CLAUDE.lock
 *.o
 *.log
 compile_commands.json
+# Third-party OUI registry source (re-downloadable); only the generated
+# data/oui.bin and tools/build_oui.py are tracked.
+master_oui.txt
+master_oui.txt.gz
